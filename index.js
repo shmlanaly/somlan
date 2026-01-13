@@ -23,7 +23,7 @@ const getYoutubeClient = () => {
         );
         oauth2Client.setCredentials(tokens);
         return google.youtube({ version: 'v3', auth: oauth2Client });
-    } catch (e) { throw new Error("يوتيوب: خطأ في الرموز"); }
+    } catch (e) { throw new Error("YouTube Init Failed"); }
 };
 
 app.get('/make-viral-video', async (req, res) => {
@@ -32,13 +32,16 @@ app.get('/make-viral-video', async (req, res) => {
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🚀 V13.0: إنتاج فيديو احترافي...");
+        console.log("🚀 V14.0: إنتاج فيديو طويل (30 ثانية فأكثر)...");
         const youtube = getYoutubeClient();
 
-        // 1. طلب قصة أطول قليلاً (حوالي 30-40 كلمة) لضمان وقت كافٍ
+        // 1. إجبار الذكاء الاصطناعي على كتابة قصة طويلة (حد أدنى 65 كلمة)
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
-            messages: [{ role: "user", content: "اعطني حقيقة مذهلة وطويلة (40 كلمة) بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
+            messages: [{ 
+                role: "user", 
+                content: "اكتب قصة أو حقيقة علمية مذهلة باللغة العربية بأسلوب مشوق. يجب أن لا يقل عدد الكلمات عن 70 كلمة لضمان طول الفيديو. أرسل النتيجة كـ JSON حصراً: {\"title\": \"..\", \"story\": \"..\"}" 
+            }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
         const content = JSON.parse(groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/)[0]);
@@ -52,50 +55,46 @@ app.get('/make-viral-video', async (req, res) => {
             gtts.save(audioPath, (e) => e ? rej(e) : res());
         });
 
-        // 2. البحث عن فيديو عالي الجودة وطويل (Portrait)
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=5`, { 
+        // 2. سحب فيديو طولي من Pexels
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=galaxy&orientation=portrait&per_page=1`, { 
             headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
         });
         
-        // نختار الفيديو الثاني أو الثالث لضمان التنوع
-        const videoUrl = pexelsRes.data.videos[0].video_files.find(f => f.quality === 'sd' || f.width < 1000).link;
+        const videoUrl = pexelsRes.data.videos[0].video_files.find(f => f.width < 1000).link;
         const writer = fs.createWriteStream(videoPath);
         const vid = await axios({ url: videoUrl, method: 'GET', responseType: 'stream' });
         vid.data.pipe(writer);
         await new Promise((res) => writer.on('finish', res));
 
-        // 3. الدمج الاحترافي (إعادة تكرار الفيديو ليناسب الصوت)
+        // 3. الدمج مع إبطاء الصوت قليلاً (atempo=0.9) لزيادة المدة وضمان الجودة
         const finalPath = path.join(workDir, 'final.mp4');
-        console.log("⚙️ جاري دمج الفيديو مع الصوت مع ميزة Loop...");
-        
         await new Promise((resolve, reject) => {
             const ffmpeg = spawn(ffmpegPath, [
                 '-y', 
-                '-stream_loop', '-1', // تكرار الفيديو للأبد حتى ينتهي الصوت
+                '-stream_loop', '-1', 
                 '-i', videoPath, 
                 '-i', audioPath,
+                '-filter_complex', '[1:a]atempo=0.9[outa]', // إبطاء الصوت بنسبة 10% لزيادة الوقت
+                '-map', '0:v:0',
+                '-map', '[outa]',
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
                 '-crf', '28',
-                '-c:a', 'aac',
-                '-map', '0:v:0',
-                '-map', '1:a:0',
-                '-shortest', // التوقف عند انتهاء أقصر ملف (وهو الصوت هنا بعد الـ loop)
-                '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280', // إجبار أبعاد الـ Shorts
+                '-shortest', 
+                '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
                 finalPath
             ]);
 
             ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error("FFmpeg Fail")));
         });
 
-        // 4. الرفع بعنوان جذاب لضمان ظهور الـ Shorts
-        console.log("⬆️ الرفع النهائي كـ Shorts...");
+        // 4. الرفع النهائي
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
                 snippet: { 
                     title: content.title + " #shorts", 
-                    description: content.story + "\n\n#shorts #facts #technology",
+                    description: content.story + "\n\n#longshorts #facts",
                     categoryId: "22"
                 },
                 status: { privacyStatus: 'public' }
@@ -103,13 +102,13 @@ app.get('/make-viral-video', async (req, res) => {
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        res.send(`<h1>✅ تم النشر باحترافية (V13)!</h1><p>رابط الفيديو الطويل/Shorts: https://youtu.be/${uploadRes.data.id}</p>`);
+        res.send(`<h1>✅ تم إنتاج فيديو طويل (+30 ثانية)!</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
 
     } catch (error) {
-        res.status(500).send(`❌ خطأ الجودة V13: ${error.message}`);
+        res.status(500).send(`❌ خطأ V14: ${error.message}`);
     } finally {
         fs.remove(workDir).catch(()=>{});
     }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`Professional V13 Active`));
+app.listen(port, '0.0.0.0', () => console.log(`V14.0 Long-Video Edition Active`));
