@@ -12,35 +12,19 @@ const port = process.env.PORT || 8080;
 
 const cleanKey = (k) => k ? k.trim() : "";
 
-// دالة إعداد يوتيوب المصفحة
+// تهيئة يوتيوب مع حماية من الأخطاء
 const getYoutubeClient = () => {
     try {
         const rawTokens = cleanKey(process.env.TOKENS);
-        if (!rawTokens) throw new Error("متغير TOKENS مفقود تماماً من إعدادات Railway");
-
-        let tokens;
-        try {
-            tokens = JSON.parse(rawTokens);
-        } catch (e) {
-            console.log("Tokens not JSON, trying as string");
-            tokens = { refresh_token: rawTokens };
-        }
-
-        const clientID = cleanKey(process.env.CLIENT_ID);
-        const clientSecret = cleanKey(process.env.CLIENT_SECRET);
-
-        if (!clientID || !clientSecret) throw new Error("ClientID أو ClientSecret مفقود");
-
+        const tokens = rawTokens.startsWith('{') ? JSON.parse(rawTokens) : { refresh_token: rawTokens };
         const oauth2Client = new google.auth.OAuth2(
-            clientID,
-            clientSecret,
+            cleanKey(process.env.CLIENT_ID),
+            cleanKey(process.env.CLIENT_SECRET),
             "https://developers.google.com/oauthplayground"
         );
         oauth2Client.setCredentials(tokens);
         return google.youtube({ version: 'v3', auth: oauth2Client });
-    } catch (e) {
-        throw new Error("خطأ في تهيئة يوتيوب: " + e.message);
-    }
+    } catch (e) { throw new Error("يوتيوب: الرموز (Tokens) غير صالحة"); }
 };
 
 app.get('/make-viral-video', async (req, res) => {
@@ -49,13 +33,13 @@ app.get('/make-viral-video', async (req, res) => {
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🎬 V10.1: التحقق من اليوتيوب...");
+        console.log("🚀 V11.0: بدء الإنتاج بنمط استهلاك الموارد المنخفض...");
         const youtube = getYoutubeClient();
 
-        console.log("🚀 V10.1: توليد المحتوى...");
+        // 1. محتوى ذكي وقصير جداً لتقليل حجم الفيديو
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
-            messages: [{ role: "user", content: "حقيقة قصيرة جدا (10 كلمات) بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
+            messages: [{ role: "user", content: "اعطني حقيقة مذهلة في 10 كلمات فقط بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
         const content = JSON.parse(groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/)[0]);
@@ -66,7 +50,8 @@ app.get('/make-viral-video', async (req, res) => {
         await Promise.all([
             new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (e) => e ? rej(e) : res())),
             (async () => {
-                const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&per_page=1`, { 
+                // طلب أصغر جودة ممكنة من Pexels لتوفير الذاكرة
+                const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1&size=small`, { 
                     headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
                 });
                 const writer = fs.createWriteStream(videoPath);
@@ -76,13 +61,34 @@ app.get('/make-viral-video', async (req, res) => {
             })()
         ]);
 
+        // 2. الدمج الحذر (The Cautious Merge)
         const finalPath = path.join(workDir, 'final.mp4');
+        console.log("⚙️ جاري الدمج بنمط الحماية من الانهيار...");
         await new Promise((resolve, reject) => {
-            const ffmpeg = spawn(ffmpegPath, ['-y', '-i', videoPath, '-i', audioPath, '-c:v', 'libx264', '-preset', 'ultrafast', '-shortest', finalPath]);
-            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error("FFmpeg فشل بكود: " + code)));
+            const ffmpeg = spawn(ffmpegPath, [
+                '-y', 
+                '-i', videoPath, 
+                '-i', audioPath,
+                '-t', '15',                 // تحديد مدة الفيديو بـ 15 ثانية كحد أقصى
+                '-vf', 'scale=480:-1',      // تقليل الدقة لـ 480p لتقليل ضغط الرام
+                '-c:v', 'libx264', 
+                '-preset', 'ultrafast',     // أسرع معالجة ممكنة
+                '-crf', '28',               // تقليل الجودة قليلاً لتخفيف الملف
+                '-threads', '1',            // إجبار المعالج على استخدام نواة واحدة فقط لمنع قتله
+                '-shortest', 
+                finalPath
+            ]);
+
+            ffmpeg.on('close', (code) => {
+                if (code === 0) resolve();
+                else reject(new Error(`FFmpeg تم إنهاؤه بالكود: ${code}`));
+            });
+            
+            ffmpeg.on('error', (err) => reject(new Error(`فشل بدء FFmpeg: ${err.message}`)));
         });
 
-        console.log("⬆️ V10.1: جاري الرفع...");
+        // 3. الرفع السريع
+        console.log("⬆️ جاري الرفع النهائي...");
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
@@ -92,14 +98,14 @@ app.get('/make-viral-video', async (req, res) => {
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        res.send(`✅ تم بنجاح V10.1! الرابط: https://youtu.be/${uploadRes.data.id}`);
+        res.send(`<h1>✅ تم النشر بنجاح!</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
 
     } catch (error) {
-        console.error("V10.1 Catch:", error);
-        res.status(500).send(`❌ خطأ V10.1 مفصل: ${error.message || error}`);
+        console.error("V11 Error:", error.message);
+        res.status(500).send(`❌ خطأ V11 حاسم: ${error.message}`);
     } finally {
         fs.remove(workDir).catch(()=>{});
     }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`V10.1 Debugger Ready`));
+app.listen(port, '0.0.0.0', () => console.log(`Architecture V11.0 Stable Ready`));
