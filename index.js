@@ -12,7 +12,6 @@ const port = process.env.PORT || 8080;
 const cleanKey = (k) => k ? k.trim() : "";
 const historyFile = path.join(__dirname, 'history.json');
 
-// دالة لإدارة الذاكرة (منع التكرار)
 const getHistory = () => {
     if (fs.existsSync(historyFile)) return fs.readJsonSync(historyFile);
     return [];
@@ -20,7 +19,7 @@ const getHistory = () => {
 const saveToHistory = (title) => {
     const history = getHistory();
     history.push(title);
-    if (history.length > 100) history.shift(); // احتفاظ بآخر 100 فيديو فقط
+    if (history.length > 50) history.shift();
     fs.writeJsonSync(historyFile, history);
 };
 
@@ -43,71 +42,69 @@ app.get('/make-viral-video', async (req, res) => {
         const youtube = getYoutubeClient();
         const history = getHistory();
 
-        // 1. طلب قصة رعب فريدة (مع إخبار الذكاء الاصطناعي بالقصص السابقة لتجنبها)
-        console.log("👻 جاري تأليف قصة رعب جديدة...");
+        console.log("👻 جاري تأليف قصة رعب فريدة...");
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
             messages: [{ 
                 role: "user", 
-                content: `اكتب قصة رعب قصيرة جداً ومخيفة باللغة العربية (حوالي 100 كلمة). تأكد أنها ليست عن: ${history.join(', ')}. أرسل النتيجة JSON حصراً: {"title": "..", "story": "..", "search_term": "كلمة بحث بالانجليزية لفيلم مرعب"}` 
+                content: `اكتب قصة رعب قصيرة ومخيفة جداً بالعربي (80-90 كلمة). لا تكرر هذه المواضيع: ${history.join(', ')}. أرسل النتيجة JSON: {"title": "..", "story": "..", "search_term": "horror dark"}` 
             }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
         const content = JSON.parse(groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/)[0]);
         
-        // منع التكرار: إذا كانت القصة موجودة مسبقاً، نطلب غيرها (تبسيطاً سنعتمد على العنوان)
-        if (history.includes(content.title)) return res.send("⚠️ هذه القصة تم نشرها من قبل، جرب مرة أخرى.");
-
         const audioPath = path.join(workDir, 'audio.mp3');
         const videoPath = path.join(workDir, 'video.mp4');
         const finalPath = path.join(workDir, 'final.mp4');
         
-        await new Promise((resolve) => new gTTS(content.story, 'ar').save(audioPath, resolve));
+        await new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (err) => err ? rej(err) : res()));
         
-        // 2. البحث عن فيديو رعب عشوائي (غير مكرر)
-        console.log("📹 جاري البحث عن مقطع مرعب مناسب...");
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=${content.search_term || "horror"}&orientation=portrait&per_page=15`, { 
+        console.log("📹 جاري جلب فيديو عشوائي...");
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=${content.search_term || "horror"}&orientation=portrait&per_page=10`, { 
             headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
         });
         
-        // اختيار فيديو عشوائي من النتائج الـ 15 لضمان عدم التكرار
-        const randomVid = pexelsRes.data.videos[Math.floor(Math.random() * pexelsRes.data.videos.length)];
+        const vids = pexelsRes.data.videos;
+        if (!vids || vids.length === 0) throw new Error("لم يتم العثور على فيديوهات في Pexels");
+        const randomVid = vids[Math.floor(Math.random() * vids.length)];
         const videoUrl = randomVid.video_files.find(f => f.width < 1000).link;
         
         const writer = fs.createWriteStream(videoPath);
-        const vid = await axios({ url: videoUrl, method: 'GET', responseType: 'stream' });
-        vid.data.pipe(writer);
+        const vidResponse = await axios({ url: videoUrl, method: 'GET', responseType: 'stream' });
+        vidResponse.data.pipe(writer);
         await new Promise((res) => writer.on('finish', res));
 
-        // 3. المونتاج بنمط الرعب (إضاءة خافتة + نص)
-        console.log("⚙️ جاري المونتاج...");
+        console.log("⚙️ جاري المونتاج المستقر V18...");
         await new Promise((resolve, reject) => {
             const ffmpeg = spawn(ffmpegPath, [
                 '-y', '-stream_loop', '-1', '-i', videoPath, '-i', audioPath,
-                '-filter_complex', `[1:a]atempo=0.9[outa];[0:v]eq=brightness=-0.1:contrast=1.2,drawtext=text='${content.title}':fontcolor=red:fontsize=50:x=(w-text_w)/2:y=150:box=1:boxcolor=black@0.7[outv]`,
-                '-map', '[outv]', '-map', '[outa]', '-c:v', 'libx264', '-preset', 'ultrafast', '-shortest', 
-                '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280', finalPath
+                '-vf', `scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,drawtext=text='${content.title}':fontcolor=red:fontsize=40:x=(w-text_w)/2:y=150:box=1:boxcolor=black@0.6`,
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-threads', '1',
+                '-c:a', 'aac', '-shortest', finalPath
             ]);
-            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error("FFmpeg Error")));
+
+            let errorLog = "";
+            ffmpeg.stderr.on('data', (data) => errorLog += data.toString());
+            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg Failed Code ${code}: ${errorLog.slice(-100)}`)));
         });
 
-        // 4. الرفع وتحديث الذاكرة
-        console.log("⬆️ جاري الرفع إلى يوتيوب...");
+        console.log("⬆️ الرفع النهائي...");
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
-                snippet: { title: content.title + " #shorts #horror", description: content.story + "\n\n#رعب #قصص_مخيفة", categoryId: "24" },
+                snippet: { title: content.title + " #shorts #horror", description: content.story + "\n\n#رعب", categoryId: "24" },
                 status: { privacyStatus: 'public' }
             },
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        saveToHistory(content.title); // حفظ في الذاكرة لمنع التكرار مستقبلاً
-        res.send(`<h1>✅ تم نشر قصة رعب جديدة!</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
+        saveToHistory(content.title);
+        res.send(`✅ تم بنجاح V18! الفيديو: https://youtu.be/${uploadRes.data.id}`);
 
     } catch (error) {
-        res.status(500).send(`❌ خطأ مصنع الرعب: ${error.message}`);
+        console.error(error);
+        res.status(500).send(`❌ خطأ V18: ${error.message}`);
     } finally { fs.remove(workDir).catch(()=>{}); }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`Horror Factory V17 Active`));
+app.listen(port, '0.0.0.0', () => console.log(`Stable Horror Factory V18 Ready`));
