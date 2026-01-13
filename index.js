@@ -10,65 +10,97 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// تسجيل بدء التشغيل للتأكد من أن السيرفر استيقظ
-console.log("=== SERVER STARTING V9.4 ===");
-console.log("FFmpeg Path:", ffmpegPath);
-
 const cleanKey = (k) => k ? k.trim() : "";
 
+// إعداد يوتيوب
+const getYoutubeClient = () => {
+    try {
+        const rawTokens = cleanKey(process.env.TOKENS);
+        const tokens = rawTokens.startsWith('{') ? JSON.parse(rawTokens) : { refresh_token: rawTokens };
+        
+        const oauth2Client = new google.auth.OAuth2(
+            cleanKey(process.env.CLIENT_ID),
+            cleanKey(process.env.CLIENT_SECRET),
+            "https://developers.google.com/oauthplayground"
+        );
+        oauth2Client.setCredentials(tokens);
+        return google.youtube({ version: 'v3', auth: oauth2Client });
+    } catch (e) {
+        console.error("YouTube Init Failed:", e.message);
+        return null;
+    }
+};
+
 app.get('/make-viral-video', async (req, res) => {
+    req.setTimeout(600000); // رفع المهلة لـ 10 دقائق
     const workDir = path.join(__dirname, `temp_${Date.now()}`);
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🚀 V9.4 Execution Started");
-        
-        // التحقق من المفاتيح الأساسية
-        const GROQ_KEY = cleanKey(process.env.GROQ_API_KEY);
-        const PEXELS_KEY = cleanKey(process.env.PEXELS_API);
-        
-        if(!GROQ_KEY || !PEXELS_KEY) throw new Error("Missing API Keys");
+        const youtube = getYoutubeClient();
+        if (!youtube) throw new Error("فشل إعداد اتصال يوتيوب - تحقق من TOKENS");
 
-        // 1. إنشاء القصة (Groq)
+        console.log("🎬 V10.0: بدأت عملية الإنتاج...");
+
+        // 1. ذكاء اصطناعي (Groq)
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
-            messages: [{ role: "user", content: "قصة قصيرة (10 كلمات) بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
-        }, { headers: { "Authorization": `Bearer ${GROQ_KEY}` } });
-
+            messages: [{ role: "user", content: "اعطني حقيقة مذهلة (15 كلمة) بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
+        }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
+        
         const content = JSON.parse(groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/)[0]);
 
-        // 2. الصوت و الفيديو (بشكل متوازي للسرعة)
+        // 2. الصوت والفيديو
         const audioPath = path.join(workDir, 'audio.mp3');
         const videoPath = path.join(workDir, 'video.mp4');
         
-        const audioPromise = new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (e) => e ? rej(e) : res()));
-        
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&per_page=1`, { headers: { "Authorization": PEXELS_KEY } });
-        const videoUrl = pexelsRes.data.videos[0].video_files[0].link;
-        const writer = fs.createWriteStream(videoPath);
-        const vidStream = await axios({ url: videoUrl, method: 'GET', responseType: 'stream' });
-        vidStream.data.pipe(writer);
-        const videoPromise = new Promise((res) => writer.on('finish', res));
+        await Promise.all([
+            new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (e) => e ? rej(e) : res())),
+            (async () => {
+                const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&per_page=1`, { 
+                    headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
+                });
+                const writer = fs.createWriteStream(videoPath);
+                const vid = await axios({ url: pexelsRes.data.videos[0].video_files[0].link, method: 'GET', responseType: 'stream' });
+                vid.data.pipe(writer);
+                return new Promise((res) => writer.on('finish', res));
+            })()
+        ]);
 
-        await Promise.all([audioPromise, videoPromise]);
-
-        // 3. الدمج باستخدام FFmpeg الثابت
+        // 3. الدمج (FFmpeg)
         const finalPath = path.join(workDir, 'final.mp4');
         await new Promise((resolve, reject) => {
-            const ffmpeg = spawn(ffmpegPath, ['-y', '-i', videoPath, '-i', audioPath, '-c:v', 'copy', '-shortest', finalPath]);
-            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(`FFmpeg Fail Code ${code}`));
+            const ffmpeg = spawn(ffmpegPath, ['-y', '-i', videoPath, '-i', audioPath, '-c:v', 'libx264', '-preset', 'ultrafast', '-shortest', finalPath]);
+            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(`FFmpeg Fail: ${code}`));
         });
 
-        res.send(`✅ تم بنجاح V9.4! الفيديو جاهز (المعالجة تمت بنجاح)`);
+        // 4. الرفع الحقيقي ليوتيوب
+        console.log("⬆️ جاري الرفع الآن...");
+        const uploadRes = await youtube.videos.insert({
+            part: 'snippet,status',
+            requestBody: {
+                snippet: { title: content.title, description: content.story + " #shorts", categoryId: "22" },
+                status: { privacyStatus: 'public', selfDeclaredMadeForKids: false }
+            },
+            media: { body: fs.createReadStream(finalPath) }
+        });
+
+        res.send(`
+            <div style="font-family:sans-serif; text-align:center; padding:50px;">
+                <h1 style="color:#4CAF50;">🚀 تم النشر بنجاح!</h1>
+                <p><strong>العنوان:</strong> ${content.title}</p>
+                <a href="https://youtu.be/${uploadRes.data.id}" target="_blank" 
+                   style="background:#ff0000; color:#fff; padding:15px 25px; text-decoration:none; border-radius:5px;">
+                   مشاهدة الفيديو على يوتيوب
+                </a>
+            </div>
+        `);
 
     } catch (error) {
-        console.error("V9.4 Error:", error.message);
-        res.status(500).send(`❌ Error V9.4: ${error.message}`);
+        res.status(500).send(`❌ خطأ V10.0: ${error.message}`);
     } finally {
         fs.remove(workDir).catch(()=>{});
     }
 });
 
-app.listen(port, '0.0.0.0', () => {
-    console.log(`✅ Server is Listening on port ${port}`);
-});
+app.listen(port, '0.0.0.0', () => console.log(`V10.0 Final Active`));
