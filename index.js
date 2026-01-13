@@ -13,14 +13,16 @@ const cleanKey = (k) => k ? k.trim() : "";
 const historyFile = path.join(__dirname, 'history.json');
 
 const getHistory = () => {
-    if (fs.existsSync(historyFile)) return fs.readJsonSync(historyFile);
-    return [];
+    try { return fs.existsSync(historyFile) ? fs.readJsonSync(historyFile) : []; } 
+    catch (e) { return []; }
 };
 const saveToHistory = (title) => {
-    const history = getHistory();
-    history.push(title);
-    if (history.length > 50) history.shift();
-    fs.writeJsonSync(historyFile, history);
+    try {
+        const history = getHistory();
+        history.push(title);
+        if (history.length > 50) history.shift();
+        fs.writeJsonSync(historyFile, history);
+    } catch (e) { console.error("History Save Error"); }
 };
 
 const getYoutubeClient = () => {
@@ -30,7 +32,7 @@ const getYoutubeClient = () => {
         const oauth2Client = new google.auth.OAuth2(cleanKey(process.env.CLIENT_ID), cleanKey(process.env.CLIENT_SECRET), "https://developers.google.com/oauthplayground");
         oauth2Client.setCredentials(tokens);
         return google.youtube({ version: 'v3', auth: oauth2Client });
-    } catch (e) { throw new Error("يوتيوب: فشل الإعداد"); }
+    } catch (e) { throw new Error("يوتيوب: إعدادات خاطئة"); }
 };
 
 app.get('/make-viral-video', async (req, res) => {
@@ -42,12 +44,12 @@ app.get('/make-viral-video', async (req, res) => {
         const youtube = getYoutubeClient();
         const history = getHistory();
 
-        console.log("👻 جاري تأليف قصة رعب فريدة...");
+        console.log("👻 جاري تأليف قصة رعب طويلة...");
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
             messages: [{ 
                 role: "user", 
-                content: `اكتب قصة رعب قصيرة ومخيفة جداً بالعربي (80-90 كلمة). لا تكرر هذه المواضيع: ${history.join(', ')}. أرسل النتيجة JSON: {"title": "..", "story": "..", "search_term": "horror dark"}` 
+                content: `اكتب قصة رعب حقيقية ومخيفة جداً بالعربي. يجب أن يكون النص طويلاً (حوالي 120 كلمة) لضمان مدة فيديو أكثر من 35 ثانية. لا تكرر: ${history.join(', ')}. أرسل JSON حصراً: {"title": "..", "story": ".."}` 
             }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
@@ -57,16 +59,18 @@ app.get('/make-viral-video', async (req, res) => {
         const videoPath = path.join(workDir, 'video.mp4');
         const finalPath = path.join(workDir, 'final.mp4');
         
-        await new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (err) => err ? rej(err) : res()));
+        // توليد الصوت بسرعة طبيعية (Normal Speed)
+        await new Promise((resolve, reject) => {
+            const gtts = new gTTS(content.story, 'ar');
+            gtts.save(audioPath, (err) => err ? reject(err) : resolve());
+        });
         
-        console.log("📹 جاري جلب فيديو عشوائي...");
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=${content.search_term || "horror"}&orientation=portrait&per_page=10`, { 
+        console.log("📹 جاري جلب فيديو مرعب عشوائي...");
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=scary horror&orientation=portrait&per_page=15`, { 
             headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
         });
         
-        const vids = pexelsRes.data.videos;
-        if (!vids || vids.length === 0) throw new Error("لم يتم العثور على فيديوهات في Pexels");
-        const randomVid = vids[Math.floor(Math.random() * vids.length)];
+        const randomVid = pexelsRes.data.videos[Math.floor(Math.random() * pexelsRes.data.videos.length)];
         const videoUrl = randomVid.video_files.find(f => f.width < 1000).link;
         
         const writer = fs.createWriteStream(videoPath);
@@ -74,37 +78,45 @@ app.get('/make-viral-video', async (req, res) => {
         vidResponse.data.pipe(writer);
         await new Promise((res) => writer.on('finish', res));
 
-        console.log("⚙️ جاري المونتاج المستقر V18...");
+        console.log("⚙️ جاري دمج الفيديو بنمط الثبات V19...");
         await new Promise((resolve, reject) => {
+            // استخدام أبسط الأوامر لضمان عدم حدوث خطأ Filter
             const ffmpeg = spawn(ffmpegPath, [
-                '-y', '-stream_loop', '-1', '-i', videoPath, '-i', audioPath,
-                '-vf', `scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280,drawtext=text='${content.title}':fontcolor=red:fontsize=40:x=(w-text_w)/2:y=150:box=1:boxcolor=black@0.6`,
-                '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '28', '-threads', '1',
-                '-c:a', 'aac', '-shortest', finalPath
+                '-y', 
+                '-stream_loop', '-1', 
+                '-i', videoPath, 
+                '-i', audioPath,
+                '-c:v', 'libx264', 
+                '-preset', 'ultrafast', 
+                '-crf', '28',
+                '-c:a', 'aac', 
+                '-map', '0:v:0', 
+                '-map', '1:a:0', 
+                '-shortest',
+                '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
+                finalPath
             ]);
 
-            let errorLog = "";
-            ffmpeg.stderr.on('data', (data) => errorLog += data.toString());
-            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg Failed Code ${code}: ${errorLog.slice(-100)}`)));
+            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error(`FFmpeg Exit Code ${code}`)));
         });
 
-        console.log("⬆️ الرفع النهائي...");
+        console.log("⬆️ جاري الرفع...");
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
-                snippet: { title: content.title + " #shorts #horror", description: content.story + "\n\n#رعب", categoryId: "24" },
+                snippet: { title: content.title + " #shorts #horror", description: content.story + "\n\n#رعب #قصص", categoryId: "24" },
                 status: { privacyStatus: 'public' }
             },
             media: { body: fs.createReadStream(finalPath) }
         });
 
         saveToHistory(content.title);
-        res.send(`✅ تم بنجاح V18! الفيديو: https://youtu.be/${uploadRes.data.id}`);
+        res.send(`✅ تم النشر بنجاح V19! الصوت طبيعي والفيديو طويل: https://youtu.be/${uploadRes.data.id}`);
 
     } catch (error) {
         console.error(error);
-        res.status(500).send(`❌ خطأ V18: ${error.message}`);
+        res.status(500).send(`❌ خطأ V19: ${error.message}`);
     } finally { fs.remove(workDir).catch(()=>{}); }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`Stable Horror Factory V18 Ready`));
+app.listen(port, '0.0.0.0', () => console.log(`Stable Horror Factory V19 Ready`));
