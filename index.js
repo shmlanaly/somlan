@@ -8,24 +8,17 @@ const path = require('path');
 const app = express();
 const port = process.env.PORT || 8080;
 
-// دوال التنظيف
 const cleanKey = (k) => k ? k.trim() : "";
 
-// إصلاح ذكي للتوكن (يقبل النص أو JSON)
 const getTokens = () => {
     const raw = cleanKey(process.env.TOKENS);
     if (!raw) return null;
-    try {
-        return JSON.parse(raw); // محاولة قراءته كملف
-    } catch (e) {
-        return { refresh_token: raw }; // إذا فشل، نعتبره توكن مباشر
-    }
+    try { return JSON.parse(raw); } catch (e) { return { refresh_token: raw }; }
 };
 
 const GROQ_KEY = cleanKey(process.env.GROQ_API_KEY);
 const PEXELS_KEY = cleanKey(process.env.PEXELS_API);
 
-// إعداد يوتيوب الآمن (لن يتعطل إذا كان التوكن فارغاً)
 let youtube;
 try {
     const tokens = getTokens();
@@ -37,38 +30,32 @@ try {
         );
         oauth2Client.setCredentials(tokens);
         youtube = google.youtube({ version: 'v3', auth: oauth2Client });
-        console.log("✅ تم ربط يوتيوب بنجاح.");
-    } else {
-        console.log("⚠️ تحذير: لم يتم العثور على TOKENS");
+        console.log("✅ YouTube Linked");
     }
-} catch (error) {
-    console.error("❌ خطأ في إعداد يوتيوب:", error.message);
-}
+} catch (error) { console.error("YouTube Error:", error.message); }
 
 app.get('/make-viral-video', async (req, res) => {
-    if (!youtube) return res.send("❌ السيرفر يعمل، لكن إعدادات يوتيوب (TOKENS) غير صحيحة.");
-    
+    // زيادة وقت المهلة لضمان عدم انقطاع الاتصال
+    req.setTimeout(300000); // 5 دقائق
+
     const workDir = path.join(__dirname, `temp_${Date.now()}`);
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🚀 بدء صناعة الفيديو V8.1...");
+        console.log("🚀 V9.0 Start...");
+        if (!youtube) throw new Error("إعدادات يوتيوب غير صحيحة (TOKENS)");
 
         // 1. القصة
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
-            messages: [{ 
-                role: "user", 
-                content: "أكتب لي قصة قصيرة جداً (30 كلمة) وعنوان جذاب عن حقيقة علمية غريبة بصيغة JSON حصراً: {\"title\": \"...\", \"story\": \"...\"}" 
-            }]
+            messages: [{ role: "user", content: "قصة قصيرة جداً (20 كلمة) وعنوان عن حقيقة علمية بصيغة JSON: {\"title\": \"...\", \"story\": \"...\"}" }]
         }, { headers: { "Authorization": `Bearer ${GROQ_KEY}` } });
 
         let content;
-        try {
-            content = JSON.parse(groqRes.data.choices[0].message.content);
-        } catch(e) {
+        try { content = JSON.parse(groqRes.data.choices[0].message.content); }
+        catch(e) { 
             const jsonMatch = groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/);
-            content = jsonMatch ? JSON.parse(jsonMatch[0]) : { title: "حقيقة مدهشة", story: groqRes.data.choices[0].message.content };
+            content = jsonMatch ? JSON.parse(jsonMatch[0]) : { title: "Fact", story: groqRes.data.choices[0].message.content };
         }
 
         // 2. الصوت
@@ -78,10 +65,12 @@ app.get('/make-viral-video', async (req, res) => {
             gtts.save(audioPath, (err) => err ? reject(err) : resolve());
         });
 
-        // 3. الفيديو
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=1`, {
+        // 3. الفيديو (جودة أقل لسرعة المعالجة)
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&orientation=portrait&size=small&per_page=1`, {
             headers: { "Authorization": PEXELS_KEY }
         });
+        if (!pexelsRes.data.videos.length) throw new Error("لم يتم العثور على فيديو في Pexels");
+        
         const videoUrl = pexelsRes.data.videos[0].video_files[0].link;
         const videoPath = path.join(workDir, 'video.mp4');
         const writer = fs.createWriteStream(videoPath);
@@ -92,38 +81,43 @@ app.get('/make-viral-video', async (req, res) => {
             writer.on('error', reject);
         });
 
-        // 4. الدمج
+        // 4. الدمج (مع حماية من الانهيار)
         const finalPath = path.join(workDir, 'final.mp4');
-        console.log("⚙️ جاري الدمج...");
+        console.log("⚙️ Merging...");
         await new Promise((resolve, reject) => {
+            // استخدام إعدادات خفيفة جداً (ultrafast) لمنع تعليق السيرفر
             const ffmpeg = spawn('ffmpeg', [
                 '-y', '-i', videoPath, '-i', audioPath,
                 '-map', '0:v', '-map', '1:a',
-                '-c:v', 'copy', '-shortest',
+                '-c:v', 'libx264', '-preset', 'ultrafast', '-shortest', // تسريع الدمج
                 finalPath
             ]);
-            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(`FFmpeg error code: ${code}`));
+            
+            // 🔥 هذا هو الإصلاح: التقاط أخطاء التشغيل
+            ffmpeg.on('error', (err) => reject(`FFmpeg Failed to start: ${err.message}`));
+            ffmpeg.stderr.on('data', (data) => console.log(`FFmpeg: ${data}`)); // مراقبة السجل
+            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(`FFmpeg exited with code ${code}`));
         });
 
         // 5. الرفع
-        console.log("⬆️ جاري الرفع...");
+        console.log("⬆️ Uploading...");
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
-                snippet: { title: content.title, description: content.story + "\n#shorts", tags: ["shorts"] },
-                status: { privacyStatus: 'public', selfDeclaredMadeForKids: false }
+                snippet: { title: content.title, description: content.story + " #shorts", tags: ["shorts"] },
+                status: { privacyStatus: 'public' }
             },
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        res.send(`✅ تم النشر بنجاح (V8.1)! \n 🎬 الفيديو: https://youtu.be/${uploadRes.data.id}`);
+        res.send(`✅ تم (V9.0)! الفيديو: https://youtu.be/${uploadRes.data.id}`);
 
     } catch (error) {
-        console.error(error);
-        res.send(`❌ حدث خطأ: ${error.message}`);
+        console.error("CRITICAL ERROR:", error);
+        res.status(500).send(`❌ خطأ بالتفصيل: ${error.message}`);
     } finally {
-        fs.remove(workDir);
+        fs.remove(workDir).catch(() => {});
     }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`Factory V8.1 Running on ${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`Server V9.0 Stable running on ${port}`));
