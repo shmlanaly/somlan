@@ -32,15 +32,15 @@ app.get('/make-viral-video', async (req, res) => {
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🚀 V14.0: إنتاج فيديو طويل (30 ثانية فأكثر)...");
+        console.log("🚀 V15.0: بدء نظام تلخيص الأفلام...");
         const youtube = getYoutubeClient();
 
-        // 1. إجبار الذكاء الاصطناعي على كتابة قصة طويلة (حد أدنى 65 كلمة)
+        // 1. طلب تلخيص لفيلم أو قصة عالمية (أكثر من 80 كلمة لضمان الوقت)
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
             messages: [{ 
                 role: "user", 
-                content: "اكتب قصة أو حقيقة علمية مذهلة باللغة العربية بأسلوب مشوق. يجب أن لا يقل عدد الكلمات عن 70 كلمة لضمان طول الفيديو. أرسل النتيجة كـ JSON حصراً: {\"title\": \"..\", \"story\": \"..\"}" 
+                content: "قم بتلخيص قصة فيلم خيال علمي أو دراما شهير بأسلوب مشوق جداً. يجب أن يكون النص طويلاً (حوالي 90 كلمة) باللغة العربية. أرسل النتيجة كـ JSON: {\"title\": \"اسم الفيلم\", \"story\": \"التلخيص..\", \"search_term\": \"كلمة للبحث عن فيديو متعلق\"}" 
             }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
@@ -49,14 +49,14 @@ app.get('/make-viral-video', async (req, res) => {
         const audioPath = path.join(workDir, 'audio.mp3');
         const videoPath = path.join(workDir, 'video.mp4');
         
-        // توليد الصوت
         await new Promise((res, rej) => {
             const gtts = new gTTS(content.story, 'ar');
             gtts.save(audioPath, (e) => e ? rej(e) : res());
         });
 
-        // 2. سحب فيديو طولي من Pexels
-        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=galaxy&orientation=portrait&per_page=1`, { 
+        // 2. البحث عن فيديو متعلق بالفيلم (مثلاً: دراما، فضاء، حرب)
+        const searchTerm = content.search_term || "movie cinematic";
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=${searchTerm}&orientation=portrait&per_page=1`, { 
             headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
         });
         
@@ -66,7 +66,7 @@ app.get('/make-viral-video', async (req, res) => {
         vid.data.pipe(writer);
         await new Promise((res) => writer.on('finish', res));
 
-        // 3. الدمج مع إبطاء الصوت قليلاً (atempo=0.9) لزيادة المدة وضمان الجودة
+        // 3. الدمج مع إضافة نص توضيحي (Subtitles) تلقائياً
         const finalPath = path.join(workDir, 'final.mp4');
         await new Promise((resolve, reject) => {
             const ffmpeg = spawn(ffmpegPath, [
@@ -74,12 +74,11 @@ app.get('/make-viral-video', async (req, res) => {
                 '-stream_loop', '-1', 
                 '-i', videoPath, 
                 '-i', audioPath,
-                '-filter_complex', '[1:a]atempo=0.9[outa]', // إبطاء الصوت بنسبة 10% لزيادة الوقت
-                '-map', '0:v:0',
+                '-filter_complex', `[1:a]atempo=0.95[outa];[0:v]drawtext=text='${content.title}':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=100:box=1:boxcolor=black@0.5:boxborderw=5[outv]`,
+                '-map', '[outv]',
                 '-map', '[outa]',
                 '-c:v', 'libx264',
                 '-preset', 'ultrafast',
-                '-crf', '28',
                 '-shortest', 
                 '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280',
                 finalPath
@@ -88,27 +87,27 @@ app.get('/make-viral-video', async (req, res) => {
             ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error("FFmpeg Fail")));
         });
 
-        // 4. الرفع النهائي
+        // 4. الرفع
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
                 snippet: { 
-                    title: content.title + " #shorts", 
-                    description: content.story + "\n\n#longshorts #facts",
-                    categoryId: "22"
+                    title: "تلخيص فيلم: " + content.title + " #shorts", 
+                    description: content.story + "\n\n#movierecap #تلخيص_أفلام",
+                    categoryId: "24" // Entertainment
                 },
                 status: { privacyStatus: 'public' }
             },
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        res.send(`<h1>✅ تم إنتاج فيديو طويل (+30 ثانية)!</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
+        res.send(`<h1>✅ تم إنتاج تلخيص فيلم (V15)!</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
 
     } catch (error) {
-        res.status(500).send(`❌ خطأ V14: ${error.message}`);
+        res.status(500).send(`❌ خطأ V15: ${error.message}`);
     } finally {
         fs.remove(workDir).catch(()=>{});
     }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`V14.0 Long-Video Edition Active`));
+app.listen(port, '0.0.0.0', () => console.log(`Movie Recap V15 Ready`));
