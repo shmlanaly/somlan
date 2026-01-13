@@ -32,13 +32,13 @@ app.get('/make-viral-video', async (req, res) => {
     await fs.ensureDir(workDir);
     
     try {
-        console.log("🚀 V12.0: تشغيل بروتوكول النسخ المباشر...");
+        console.log("🚀 V13.0: إنتاج فيديو احترافي...");
         const youtube = getYoutubeClient();
 
-        // 1. محتوى سريع
+        // 1. طلب قصة أطول قليلاً (حوالي 30-40 كلمة) لضمان وقت كافٍ
         const groqRes = await axios.post("https://api.groq.com/openai/v1/chat/completions", {
             model: "llama-3.3-70b-versatile",
-            messages: [{ role: "user", content: "حقيقة واحدة مذهلة (10 كلمات) JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
+            messages: [{ role: "user", content: "اعطني حقيقة مذهلة وطويلة (40 كلمة) بصيغة JSON: {\"title\": \"..\", \"story\": \"..\"}" }]
         }, { headers: { "Authorization": `Bearer ${cleanKey(process.env.GROQ_API_KEY)}` } });
         
         const content = JSON.parse(groqRes.data.choices[0].message.content.match(/\{[\s\S]*\}/)[0]);
@@ -46,71 +46,70 @@ app.get('/make-viral-video', async (req, res) => {
         const audioPath = path.join(workDir, 'audio.mp3');
         const videoPath = path.join(workDir, 'video.mp4');
         
-        await Promise.all([
-            new Promise((res, rej) => new gTTS(content.story, 'ar').save(audioPath, (e) => e ? rej(e) : res())),
-            (async () => {
-                const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&per_page=1&size=small`, { 
-                    headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
-                });
-                const writer = fs.createWriteStream(videoPath);
-                const vid = await axios({ url: pexelsRes.data.videos[0].video_files[0].link, method: 'GET', responseType: 'stream' });
-                vid.data.pipe(writer);
-                return new Promise((res) => writer.on('finish', res));
-            })()
-        ]);
+        // توليد الصوت
+        await new Promise((res, rej) => {
+            const gtts = new gTTS(content.story, 'ar');
+            gtts.save(audioPath, (e) => e ? rej(e) : res());
+        });
 
-        // 2. الدمج الذكي (Stream Copy)
-        // نستخدم -c:v copy لنقل الفيديو كما هو دون ضغط (CPU = 0)
-        // نستخدم -c:a aac لتحويل الصوت فقط لأنه خفيف جداً
+        // 2. البحث عن فيديو عالي الجودة وطويل (Portrait)
+        const pexelsRes = await axios.get(`https://api.pexels.com/videos/search?query=nature&orientation=portrait&per_page=5`, { 
+            headers: { "Authorization": cleanKey(process.env.PEXELS_API) } 
+        });
+        
+        // نختار الفيديو الثاني أو الثالث لضمان التنوع
+        const videoUrl = pexelsRes.data.videos[0].video_files.find(f => f.quality === 'sd' || f.width < 1000).link;
+        const writer = fs.createWriteStream(videoPath);
+        const vid = await axios({ url: videoUrl, method: 'GET', responseType: 'stream' });
+        vid.data.pipe(writer);
+        await new Promise((res) => writer.on('finish', res));
+
+        // 3. الدمج الاحترافي (إعادة تكرار الفيديو ليناسب الصوت)
         const finalPath = path.join(workDir, 'final.mp4');
-        console.log("⚙️ جاري دمج المسارات بدون إعادة ترميز...");
+        console.log("⚙️ جاري دمج الفيديو مع الصوت مع ميزة Loop...");
+        
         await new Promise((resolve, reject) => {
             const ffmpeg = spawn(ffmpegPath, [
                 '-y', 
+                '-stream_loop', '-1', // تكرار الفيديو للأبد حتى ينتهي الصوت
                 '-i', videoPath, 
                 '-i', audioPath,
-                '-c:v', 'copy',      // 🔥 السر هنا: نسخ الفيديو وليس إعادة معالجته
-                '-c:a', 'aac',       // تحويل الصوت لصيغة متوافقة
-                '-map', '0:v:0',     // خذ الفيديو من الملف الأول
-                '-map', '1:a:0',     // خذ الصوت من الملف الثاني
-                '-shortest', 
+                '-c:v', 'libx264',
+                '-preset', 'ultrafast',
+                '-crf', '28',
+                '-c:a', 'aac',
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                '-shortest', // التوقف عند انتهاء أقصر ملف (وهو الصوت هنا بعد الـ loop)
+                '-vf', 'scale=720:1280:force_original_aspect_ratio=increase,crop=720:1280', // إجبار أبعاد الـ Shorts
                 finalPath
             ]);
 
-            let log = "";
-            ffmpeg.stderr.on('data', (d) => log += d.toString());
-            ffmpeg.on('close', (code) => {
-                if (code === 0) resolve();
-                else {
-                    console.log("Copy failed, trying Fallback...");
-                    // إذا فشل النسخ المباشر، نجرب مشفر mpeg4 البدائي جداً
-                    const fallback = spawn(ffmpegPath, [
-                        '-y', '-i', videoPath, '-i', audioPath,
-                        '-c:v', 'mpeg4', '-preset', 'ultrafast', '-shortest', finalPath
-                    ]);
-                    fallback.on('close', (c) => c === 0 ? resolve() : reject(new Error(`Failed with Log: ${log.slice(-100)}`)));
-                }
-            });
+            ffmpeg.on('close', (code) => code === 0 ? resolve() : reject(new Error("FFmpeg Fail")));
         });
 
-        // 3. الرفع
-        console.log("⬆️ الرفع النهائي...");
+        // 4. الرفع بعنوان جذاب لضمان ظهور الـ Shorts
+        console.log("⬆️ الرفع النهائي كـ Shorts...");
         const uploadRes = await youtube.videos.insert({
             part: 'snippet,status',
             requestBody: {
-                snippet: { title: content.title, description: content.story + " #shorts" },
+                snippet: { 
+                    title: content.title + " #shorts", 
+                    description: content.story + "\n\n#shorts #facts #technology",
+                    categoryId: "22"
+                },
                 status: { privacyStatus: 'public' }
             },
             media: { body: fs.createReadStream(finalPath) }
         });
 
-        res.send(`<h1>✅ مبروك! تم الكسر والرفع بنجاح (V12)</h1><p>الرابط: https://youtu.be/${uploadRes.data.id}</p>`);
+        res.send(`<h1>✅ تم النشر باحترافية (V13)!</h1><p>رابط الفيديو الطويل/Shorts: https://youtu.be/${uploadRes.data.id}</p>`);
 
     } catch (error) {
-        res.status(500).send(`❌ خطأ V12 النهائي: ${error.message}`);
+        res.status(500).send(`❌ خطأ الجودة V13: ${error.message}`);
     } finally {
         fs.remove(workDir).catch(()=>{});
     }
 });
 
-app.listen(port, '0.0.0.0', () => console.log(`Stable V12.0 Ready`));
+app.listen(port, '0.0.0.0', () => console.log(`Professional V13 Active`));
